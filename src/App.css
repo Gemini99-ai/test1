@@ -1,0 +1,132 @@
+import React, { useState, useEffect, useCallback } from 'react';
+import Auth from './components/Auth';
+import Chat from './components/Chat';
+import Logs from './components/Logs'; // Import the new Logs component
+import { connectWebSocket, disconnectWebSocket, sendRequest } from './services/websocket';
+import './App.css';
+
+function App() {
+  // --- State Management ---
+  const [location, setLocation] = useState(window.location.pathname); // For routing
+  const [currentUser, setCurrentUser] = useState(null);
+  const [wsInstance, setWsInstance] = useState(null);
+  
+  // All application data is now managed by the top-level App component
+  const [users, setUsers] = useState([]);
+  const [messages, setMessages] = useState({});
+  const [typingUsers, setTypingUsers] = useState({});
+
+  // --- WebSocket Connection and Message Handling ---
+  const setupWebSocket = useCallback(() => {
+    const ws = connectWebSocket();
+
+    ws.onopen = () => {
+      console.log("WebSocket connected, sending re-login request.");
+      // When the connection opens, immediately try to log in to get the user list
+      if(currentUser) {
+        sendRequest('login', { username: currentUser.username, password: 'password-placeholder-relogin' });
+      }
+    };
+    
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      switch (data.type) {
+        // Note: loginSuccess is handled by Auth.jsx, but we listen here for re-login
+        case 'loginSuccess':
+          localStorage.setItem('currentUser', JSON.stringify(data.user));
+          setCurrentUser(data.user);
+          break;
+        case 'userList':
+          setUsers(data.users);
+          break;
+        case 'messageHistory':
+          setMessages(prev => ({ ...prev, [data.recipientId]: data.messages }));
+          break;
+        case 'newMessage': {
+          setTypingUsers(prev => ({ ...prev, [data.message.senderId]: false }));
+          const chatPartnerId = data.message.senderId === currentUser.id ? data.message.recipientId : data.message.senderId;
+          setMessages(prev => ({ ...prev, [chatPartnerId]: [...(prev[chatPartnerId] || []), data.message] }));
+          break;
+        }
+        case 'typing':
+          setTypingUsers(prev => ({ ...prev, [data.userId]: true }));
+          break;
+        case 'stop_typing':
+          setTypingUsers(prev => ({ ...prev, [data.userId]: false }));
+          break;
+        case 'forceLogout':
+          alert(data.message);
+          handleLogout();
+          break;
+      }
+    };
+
+    setWsInstance(ws);
+  }, [currentUser]); // Dependency on currentUser ensures we can use its data for re-login
+
+  useEffect(() => {
+    // Check for a saved user session on initial application load
+    const savedUser = localStorage.getItem('currentUser');
+    if (savedUser) {
+      setCurrentUser(JSON.parse(savedUser));
+    }
+
+    // Set up a simple router to listen for URL changes
+    const onLocationChange = () => setLocation(window.location.pathname);
+    window.addEventListener('popstate', onLocationChange);
+    return () => {
+      window.removeEventListener('popstate', onLocationChange);
+      disconnectWebSocket(); // Clean up WebSocket on exit
+    };
+  }, []); // Empty array means this runs only once
+
+  // This effect manages the WebSocket lifecycle
+  useEffect(() => {
+    if (currentUser && !wsInstance) {
+      setupWebSocket();
+    } else if (!currentUser && wsInstance) {
+      disconnectWebSocket();
+      setWsInstance(null);
+    }
+  }, [currentUser, wsInstance, setupWebSocket]);
+  
+  // --- Event Handlers to Pass Down to Children ---
+  const handleLoginSuccess = (user) => {
+    setCurrentUser(user);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    setUsers([]);
+    setMessages({});
+    setTypingUsers({});
+    localStorage.removeItem('currentUser');
+    // Navigate back to the login page
+    window.history.pushState({}, '', '/');
+    setLocation('/');
+  };
+
+  // --- Render Logic ---
+  const renderContent = () => {
+    if (location.startsWith('/logs')) {
+      return <Logs />;
+    }
+    if (!currentUser) {
+      return <Auth onLoginSuccess={handleLoginSuccess} />;
+    }
+    // Pass all necessary data and functions down to the Chat component
+    return (
+      <Chat 
+        currentUser={currentUser} 
+        users={users}
+        messages={messages}
+        typingUsers={typingUsers}
+        onLogout={handleLogout} 
+      />
+    );
+  };
+
+  return <div className="app-wrapper">{renderContent()}</div>;
+}
+
+export default App;
